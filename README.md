@@ -69,8 +69,3 @@ start -> learning -> success
 A temporary `fail` can happen if the room is not empty, there is movement, or the sensor is still settling. Retry with the room empty.
 
 After a successful calibration, `Sensitivity preset` may switch to `custom`. This is expected: the device has generated custom per-zone thresholds.
-
-<a href="https://buymeacoffee.com/micium" target="_blank">
-  <img src="https://cdn.buymeacoffee.com/buttons/default-orange.png" alt="Buy Me A Coffee" height="41" width="174">
-</a>
-
