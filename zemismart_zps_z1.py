@@ -121,6 +121,7 @@ class ZpsZ1ManufCluster(TuyaMCUCluster):
     _zone_active: list[bool]
     _motion_thr: list[int]
     _presence_thr: list[int]
+    _thresholds_initialized: bool
     _energy_stream_on: bool
     _energy_stream_enabled_for_calibration: bool
     _keepalive_task: asyncio.Task | None
@@ -282,6 +283,7 @@ class ZpsZ1ManufCluster(TuyaMCUCluster):
         self._zone_active = [True] * ZONE_COUNT
         self._motion_thr = [128] * ZONE_COUNT
         self._presence_thr = [128] * ZONE_COUNT
+        self._thresholds_initialized = False
         self._energy_stream_on = False
         self._energy_stream_enabled_for_calibration = False
         self._keepalive_task = None
@@ -328,12 +330,7 @@ class ZpsZ1ManufCluster(TuyaMCUCluster):
             elif dp == DP_AI_SELF_LEARNING:
                 raw = data[0] if data else 0
                 status = CALIB_STATUS_MAP.get(raw, f"unknown({raw})")
-                log = (
-                    _LOGGER.warning
-                    if raw != self._auto_calibration_status_raw
-                    else _LOGGER.debug
-                )
-                log(
+                _LOGGER.debug(
                     "[ZPS-Z1] received DP103 auto calibration status: raw=%s status=%s",
                     data.hex(),
                     status,
@@ -452,6 +449,7 @@ class ZpsZ1ManufCluster(TuyaMCUCluster):
         )
         self._motion_thr = list(motion_raw)
         self._presence_thr = list(presence_raw)
+        self._thresholds_initialized = True
         for i in range(ZONE_COUNT):
             self._update_attribute(
                 self.attributes_by_name[f"zone_{i + 1}_motion_threshold"].id,
@@ -528,7 +526,7 @@ class ZpsZ1ManufCluster(TuyaMCUCluster):
                 return
 
             if v is AutoCalibrationCmd.start and not self._energy_stream_on:
-                _LOGGER.warning(
+                _LOGGER.debug(
                     "[ZPS-Z1] enabling energy streaming before auto calibration"
                 )
                 await self._send_dp(DP_HEARTBEAT_ENABLE, DT_BOOL, [1])
@@ -546,7 +544,7 @@ class ZpsZ1ManufCluster(TuyaMCUCluster):
                 v.name,
                 int(v),
             )
-            _LOGGER.warning(
+            _LOGGER.debug(
                 "[ZPS-Z1] sending DP103 auto calibration command: status=%s raw=%02x",
                 v.name,
                 int(v),
@@ -567,6 +565,7 @@ class ZpsZ1ManufCluster(TuyaMCUCluster):
             self._update_attribute(self.attributes_by_name[f"zone_{idx + 1}_active"].id, zones[idx])
 
         elif key.startswith("zone_") and key.endswith("_motion_threshold"):
+            await self._ensure_thresholds_initialized()
             idx = int(key.split("_")[1]) - 1
             motion = list(self._motion_thr)
             app_value = max(0, min(100, round(int(value))))
@@ -579,6 +578,7 @@ class ZpsZ1ManufCluster(TuyaMCUCluster):
             self._update_attribute(self.attributes_by_name["sensitivity_preset"].id, SensitivityPreset.custom)
 
         elif key.startswith("zone_") and key.endswith("_presence_threshold"):
+            await self._ensure_thresholds_initialized()
             idx = int(key.split("_")[1]) - 1
             presence = list(self._presence_thr)
             app_value = max(0, min(100, round(int(value))))
@@ -597,6 +597,41 @@ class ZpsZ1ManufCluster(TuyaMCUCluster):
         await asyncio.sleep(0.5)
         self._pending_zone_write = True
         await self._send_dp(DP_ZONE_MAP, DT_RAW, [1 if active else 0 for active in self._zone_active])
+
+    async def _ensure_thresholds_initialized(self) -> None:
+        if self._thresholds_initialized:
+            return
+
+        if self._load_thresholds_from_cache():
+            return
+
+        await self._query_data()
+        await asyncio.sleep(0.5)
+
+        if self._thresholds_initialized or self._load_thresholds_from_cache():
+            return
+
+        raise ValueError("energy thresholds are not initialized yet")
+
+    def _load_thresholds_from_cache(self) -> bool:
+        attr_cache = getattr(self, "_attr_cache", {})
+        motion: list[int] = []
+        presence: list[int] = []
+
+        for i in range(ZONE_COUNT):
+            motion_attr = self.attributes_by_name[f"zone_{i + 1}_motion_threshold"].id
+            presence_attr = self.attributes_by_name[f"zone_{i + 1}_presence_threshold"].id
+
+            if motion_attr not in attr_cache or presence_attr not in attr_cache:
+                return False
+
+            motion.append(_to_raw(int(attr_cache[motion_attr])))
+            presence.append(_to_raw(int(attr_cache[presence_attr])))
+
+        self._motion_thr = motion
+        self._presence_thr = presence
+        self._thresholds_initialized = True
+        return True
 
     def _start_keepalive(self) -> None:
         self._stop_keepalive()
